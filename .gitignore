@@ -2,5 +2,6 @@
 .vscode/
 __pycache__/
 20251229data/
+old_tools/
 output/
 *.pyc

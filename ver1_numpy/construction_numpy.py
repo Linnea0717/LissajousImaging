@@ -1,8 +1,6 @@
+import argparse
 import gc
 from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
-import tifffile as tiff
 
 from utils import (
     # read_raw_u16,
@@ -16,13 +14,16 @@ from utils import (
     saveXYZVolume_u16,
 )
 
-from binning import XYZbinning, XYbinning
+# from binning import XYZbinning, XYbinning
+
+from binning import (
+    XYZbinning,
+)
 
 
 # =========================
 # Parameters
 # =========================
-DATASET_DIR_NAMES = ["1", "2", "3"]
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = PROJECT_ROOT / "20251229data"
@@ -38,9 +39,6 @@ DROP_AFTER_EACH_FRAME   = 20
 DROP_TAIL = True
 
 Z_START_THRESHOLD = 1000       # channel1 > 1000 is considered the start of a z oscillation cycle (trigger)
-
-Z_SLICES_M1 = 31
-Z_SLICES_M2 = 200
 
 
 def buildFrames(
@@ -69,9 +67,10 @@ def buildFrames(
 
 def processDataset(
     dataset_name: str,
+    z_slices: int,
 ):
     data_dir = DATA_ROOT / dataset_name
-    save_dir = PROJECT_ROOT / "output" / dataset_name
+    save_dir = PROJECT_ROOT / "output" / "numpy-batch" / dataset_name
 
     raw0_path = data_dir / "raw_data_0.bin"
     raw1_path = data_dir / "raw_data_1.bin"
@@ -120,7 +119,7 @@ def processDataset(
                 frame_z_half_cycles.append((zs, ze, z_dir))
         frames_z_half_cycles.append(frame_z_half_cycles)
 
-    for i in range(1):
+    for i in range(N_frames):
         print(f"[INFO] Binning frame {i+1} / {len(frames_x_half_cycles)}")
 
         count, volume = XYZbinning(
@@ -129,13 +128,13 @@ def processDataset(
             signal=PMT,
             H=H,
             W=W,
-            Z=Z_SLICES_M1,
+            Z=z_slices,
         )
 
         saveXYZVolume_u16(
             volume=volume,
             index=i,
-            save_dir=save_dir / "volumes_z31_numpy",
+            save_dir=save_dir / f"z{z_slices}",
         )
 
         del volume
@@ -144,9 +143,55 @@ def processDataset(
         gc.collect()
 
 def __main__():
-    for dataset_name in DATASET_DIR_NAMES[0]:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Lissajous Scanning 3D Image Reconstruction Module.\n"
+            "Processes raw photomultiplier tube (PMT) signals and scanning trajectory\n"
+            "data to reconstruct volumetric images using spatial binning algorithms."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "EXAMPLES:\n"
+            "  1. Process specific datasets with default settings:\n"
+            "     python construction_stream.py --dataset 1 2\n\n"
+            "  2. Process a dataset with high-resolution Z-axis (64 slices):\n"
+            "     python construction_stream.py --dataset 3 --z_slices 64"
+        )
+    )
+
+    parser.add_argument(
+        "--dataset", 
+        nargs="+",
+        type=str,
+        default=["1", "2", "3"],
+        metavar="ID",
+        help=(
+            "List of dataset directory names to process.\n"
+            "These directories must exist within the defined data root.\n"
+            "(Default: 1, 2, 3)"
+        )
+    )
+
+    parser.add_argument(
+        "--z_slices",
+        type=int,
+        default=31,
+        metavar="N",
+        help=(
+            "Target resolution for the Z-axis (depth).\n"
+            "Determines the number of bins used during the Z-mapping process.\n"
+            "(Default: 31)"
+        )
+    )
+
+    args = parser.parse_args()
+
+    DATASET_DIR_NAMES = args.dataset
+    Z_SLICES = args.z_slices
+
+    for dataset_name in DATASET_DIR_NAMES:
         print(f"[INFO] Processing dataset {dataset_name}")
-        processDataset(dataset_name=dataset_name)
+        processDataset(dataset_name=dataset_name, z_slices=Z_SLICES)
 
 if __name__ == "__main__":
     __main__()

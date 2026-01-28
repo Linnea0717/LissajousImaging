@@ -1,7 +1,7 @@
 import numpy as np
-from numba import jit
+from numba import njit, prange
 
-@jit(nopython=True, cache=True)
+@njit(fastmath=True, cache=True)
 def getMappingIdxWeight(t, t_start, t_end, direction, max_idx):
     """
     Get the index and weight for time points within a half-cycle.
@@ -26,7 +26,7 @@ def getMappingIdxWeight(t, t_start, t_end, direction, max_idx):
     
     return xis, xws
 
-@jit(nopython=True, parallel=False, cache=True)
+@njit(fastmath=True, cache=True)
 def accumulateFrame(
     volume, count, 
     signal,
@@ -85,19 +85,11 @@ def accumulateFrame(
 
 
 def XYZbinning_numba(
-    frame_x_half_cycles, 
-    frame_z_half_cycles,
+    x_starts, x_ends, x_dirs,
+    z_starts, z_ends, z_dirs,
     signal,
     H, W, Z
 ):
-
-    x_starts = np.array([x[0] for x in frame_x_half_cycles], dtype=np.int64)
-    x_ends   = np.array([x[1] for x in frame_x_half_cycles], dtype=np.int64)
-    x_dirs   = np.array([x[2] for x in frame_x_half_cycles], dtype=np.int32)
-    
-    z_starts = np.array([z[0] for z in frame_z_half_cycles], dtype=np.int64)
-    z_ends   = np.array([z[1] for z in frame_z_half_cycles], dtype=np.int64)
-    z_dirs   = np.array([z[2] for z in frame_z_half_cycles], dtype=np.int32)
 
     volume = np.zeros((Z, H, W), dtype=np.float32)
     count = np.zeros((Z, H, W), dtype=np.float32)
