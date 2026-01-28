@@ -1,0 +1,165 @@
+import gc
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import tifffile as tiff
+
+from utils import (
+    # read_raw_u16,
+    read_raw_u16_mmap,
+    extract_trigs_and_data14_signed,
+    locateResonantTransitions,
+    transitions2HalfCycles,
+    locateTagRisingEdges,
+    risingEdges2HalfCycles,
+    saveXYFrames,
+    saveXYZVolume_u16,
+)
+
+# from binning import XYZbinning, XYbinning
+
+from binning_numba import (
+    XYZbinning_numba,
+)
+
+
+# =========================
+# Parameters
+# =========================
+DATASET_DIR_NAMES = ["1", "2", "3"]
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_ROOT = PROJECT_ROOT / "20251229data"
+
+W = 1024
+H = 1024
+
+EXPECTED_HALFCYCLE_LEN = None
+LEN_TOL = 0.5
+
+DROP_BEFORE_FIRST_FRAME = 20
+DROP_AFTER_EACH_FRAME   = 20
+DROP_TAIL = True
+
+Z_START_THRESHOLD = 1000       # channel1 > 1000 is considered the start of a z oscillation cycle (trigger)
+
+Z_SLICES_M1 = 31
+Z_SLICES_M2 = 200
+
+
+def streamFramesGenerator(
+    x_half_cycles,
+    z_half_cycles,
+    lines_per_frame: int,
+    drop_before: int,
+    drop_after: int,
+    drop_tail: bool
+):
+    total_x_cycles = len(x_half_cycles)
+    cur_x_idx = drop_before
+    frame_count = 0
+    
+    cur_z_idx = 0  # index for z half-cycles
+    num_z_half_cycles = len(z_half_cycles)
+
+    while cur_x_idx + lines_per_frame <= total_x_cycles:
+
+        # x half cycles for this frame
+        frame_x_half_cycles = x_half_cycles[cur_x_idx: cur_x_idx + lines_per_frame]
+        
+        t_start = frame_x_half_cycles[0][0]
+        t_end = frame_x_half_cycles[-1][1]
+        
+        # z half cycles within this frame
+        frame_z_half_cycles = []
+        
+        # move cursor to the first possible overlapping z half-cycle
+        while cur_z_idx < num_z_half_cycles and z_half_cycles[cur_z_idx][1] < t_start:
+            cur_z_idx += 1
+            
+        # find all overlapping z half-cycles
+        temp_idx = cur_z_idx
+        while temp_idx < num_z_half_cycles:
+            zs, ze, zdir = z_half_cycles[temp_idx]
+            if zs > t_end: # beyond current frame
+                break
+            
+            # check overlap
+            if not (ze <= t_start or zs >= t_end):
+                frame_z_half_cycles.append((zs, ze, zdir))
+            
+            temp_idx += 1
+            
+        # Yield
+        yield frame_count, frame_x_half_cycles, frame_z_half_cycles
+        
+        # update counters
+        frame_count += 1
+        cur_x_idx += lines_per_frame + drop_after
+
+
+def processDataset(dataset_name: str):
+    data_dir = DATA_ROOT / dataset_name
+    save_dir = PROJECT_ROOT / "output" / dataset_name
+
+    raw0_path = data_dir / "raw_data_0.bin"
+    raw1_path = data_dir / "raw_data_1.bin"
+    if not raw0_path.exists() or not raw1_path.exists():
+        raise FileNotFoundError(f"Cannot find {raw0_path} or {raw1_path}")
+
+    raw_u16_0 = read_raw_u16_mmap(raw0_path, endian="<u2")
+    raw_u16_1 = read_raw_u16_mmap(raw1_path, endian="<u2")
+
+    trig0, _, PMT = extract_trigs_and_data14_signed(raw_u16_0)
+    _, _, TAG = extract_trigs_and_data14_signed(raw_u16_1)
+    print(f"[INFO] Loaded {len(trig0)} samples from dataset {dataset_name}")
+    
+    transitions = locateResonantTransitions(trig0)
+    x_half_cycles = transitions2HalfCycles(transitions, trig0)
+
+    print(f"[INFO] Extracted {len(x_half_cycles)} x half-cycles from data")
+
+    rising_edges = locateTagRisingEdges(TAG, Z_START_THRESHOLD)
+    z_half_cycles = risingEdges2HalfCycles(rising_edges)
+    print(f"[INFO] Extracted {len(z_half_cycles)} z half-cycles from data")
+
+
+    print(f"[INFO] Start streaming frames...")
+    
+    frame_gen = streamFramesGenerator(
+        x_half_cycles=x_half_cycles,
+        z_half_cycles=z_half_cycles,
+        lines_per_frame=H,
+        drop_before=DROP_BEFORE_FIRST_FRAME,
+        drop_after=DROP_AFTER_EACH_FRAME,
+        drop_tail=DROP_TAIL
+    )
+    
+    for i, frame_x, frame_z in frame_gen:
+        print(f"[INFO] Processing Frame {i} | Z-cycles: {len(frame_z)}")
+        
+        count, volume = XYZbinning_numba(
+            frame_x_half_cycles=frame_x,
+            frame_z_half_cycles=frame_z,
+            signal=PMT,
+            H=H, W=W, Z=Z_SLICES_M1
+        )
+        
+        saveXYZVolume_u16(
+            volume=volume,
+            index=i,
+            save_dir=save_dir / "volumes_z31_numba",
+        )
+        
+        del volume, count
+        
+        if i % 5 == 0:
+            gc.collect()
+
+def __main__():
+    for dataset_name in DATASET_DIR_NAMES[0]:
+        print(f"[INFO] Processing dataset {dataset_name}")
+        processDataset(dataset_name=dataset_name)
+
+if __name__ == "__main__":
+    __main__()

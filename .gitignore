@@ -1,0 +1,6 @@
+.venv/
+.vscode/
+__pycache__/
+20251229data/
+output/
+*.pyc
