@@ -95,25 +95,25 @@ def simpleBaselineCorrection(
     image_corr[image_corr < 0] = 0
     return image_corr
 
-def saveXYFrames(
-    images,
+def saveXYFrame_u16(
+    image,
     save_dir: Path,
+    index: int,
 ):
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, image in enumerate(images):
+    maxv = np.percentile(image, 99.9)
+    minv = np.min(image)
 
-        image = simpleBaselineCorrection(image, percentile=5.0)
+    image_norm = (image - minv) / (maxv - minv)
+    image_norm = np.clip(image_norm, 0.0, 1.0)
 
-        maxv = np.percentile(image, 99.9)
-        image_u16 = np.clip(image / maxv, 0, 1)
-        image_u16 = (image_u16 * 65535).astype(np.uint16)
+    image_u16 = (image_norm * 65535).astype(np.uint16)
 
-        save_path = save_dir / f"frame_{i:05d}.tiff"
+    save_path = save_dir / f"frame_{index:05d}.tiff"
+    tiff.imwrite(save_path.as_posix(), image_u16, imagej=True, metadata={'axes': 'YX'})
 
-        tiff.imwrite(save_path.as_posix(), image_u16, photometric='minisblack')
-
-        print(f"[INFO] Saved frame {i} to {save_path}")
+    print(f"[INFO] Saved frame {index} to {save_path}")
 
 def saveXYZVolume_u16(
     volume,

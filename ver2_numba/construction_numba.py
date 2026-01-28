@@ -11,7 +11,7 @@ from utils import (
     transitions2HalfCycles,
     locateTagRisingEdges,
     risingEdges2HalfCycles,
-    saveXYFrames,
+    saveXYFrame_u16,
     saveXYZVolume_u16,
 )
 
@@ -143,8 +143,15 @@ def processDataset(
         saveXYZVolume_u16(
             volume=volume,
             index=i,
-            save_dir=save_dir / f"z{z_slices}",
+            save_dir=save_dir / f"z{z_slices}" / "xyzt_volumes",
         )
+
+        for z in range(z_slices):
+            saveXYFrame_u16(
+                image=volume[z, :, :],
+                index=i,
+                save_dir=save_dir / f'z{z_slices}' / 'xyt_frames' / f'z-{z:03d}',
+            )
 
         del volume
         del count
