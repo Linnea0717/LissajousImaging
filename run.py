@@ -9,6 +9,7 @@ VERSION_MAP = {
     "v2": "ver2_numba/construction_numba.py",
     "v3": "ver3_numba_streaming/construction_stream.py",
     "v4": "ver4_online_idx/construction_stream.py",
+    "v5": "ver5_cuda/construction_cuda.py",
 }
 
 def run_experiment(versions, datasets, z_slices, quiet=False):
