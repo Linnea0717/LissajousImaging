@@ -8,6 +8,7 @@ VERSION_MAP = {
     "v1": "ver1_numpy/construction_numpy.py",
     "v2": "ver2_numba/construction_numba.py",
     "v3": "ver3_numba_streaming/construction_stream.py",
+    "v4": "ver4_online_idx/construction_stream.py",
 }
 
 def run_experiment(versions, datasets, z_slices, quiet=False):
@@ -32,7 +33,7 @@ def run_experiment(versions, datasets, z_slices, quiet=False):
             continue
 
         print(f"\n[+] Running version: [{ver_key}]")
-        print(f"      Path: {script_path.relative_to(base_dir)}")
+        print(f"    Path: {script_path.relative_to(base_dir)}")
         
         cmd = [
             sys.executable,

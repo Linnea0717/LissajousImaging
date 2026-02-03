@@ -2,6 +2,7 @@ versions
 - ver1_numpy: uses numpy and vectorisation
 - ver2_numba: uses numba to accelerate
 - ver3_numba_streaming: add streaming to lower RAM cost
+- ver4_online_idx: calculate z_index online (when needed) and enable parallelisation
 
 how to run (choose one)
 1. run construciton*.py directly: run `python construction*.py` for usages

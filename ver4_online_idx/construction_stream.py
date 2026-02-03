@@ -95,7 +95,7 @@ def streamFramesGenerator(
 
 def processDataset(dataset_name: str, z_slices: int):
     data_dir = DATA_ROOT / dataset_name
-    save_dir = PROJECT_ROOT / "output" / "numba-streaming" / dataset_name
+    save_dir = PROJECT_ROOT / "output" / "numba-online_idx" / dataset_name
 
     raw0_path = data_dir / "raw_data_0.bin"
     raw1_path = data_dir / "raw_data_1.bin"
@@ -133,7 +133,7 @@ def processDataset(dataset_name: str, z_slices: int):
     )
     
     for i, frame_x, frame_z in frame_gen:
-        # print(f"[INFO] Processing Frame {i} | Z-cycles: {len(frame_z)}")
+        print(f"[INFO] Processing Frame {i} | Z-cycles: {len(frame_z)}")
 
         x_starts = frame_x[:, 0].astype(np.int64)
         x_ends = frame_x[:, 1].astype(np.int64)

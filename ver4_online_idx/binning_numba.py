@@ -26,6 +26,7 @@ def getMappingIdxWeight(t, t_start, t_end, direction, max_idx):
     
     return xis, xws
 
+
 @njit(fastmath=True, cache=True, parallel=True)
 def accumulateFrame(
     volume, count, 
@@ -39,21 +40,8 @@ def accumulateFrame(
     One frame accumulation kernel.
     """
     t_len = frame_t_end - frame_t_start
-    z_idx_table = np.full(t_len, -1, dtype=np.int32)
-    z_weight_table = np.zeros(t_len, dtype=np.float32)
 
     n_z_cycles = len(z_starts)
-    for i in range(n_z_cycles):
-        zs = max(z_starts[i], frame_t_start)
-        ze = min(z_ends[i], frame_t_end)
-        zdir = z_dirs[i]
-
-        for t in range(zs, ze):
-            zi, zw = getMappingIdxWeight(t, zs, ze, zdir, Z)
-            t_rel = t - frame_t_start
-            z_idx_table[t_rel] = zi
-            z_weight_table[t_rel] = zw
-
     n_x_cycles = len(x_starts)
     
     for yi in prange(n_x_cycles):
@@ -61,16 +49,30 @@ def accumulateFrame(
         xe = x_ends[yi]
         x_dir = x_dirs[yi]
         
+        zi, zs, ze, zdir = -1, 0, 0, 0
+
+        nzi = np.searchsorted(z_starts, xs, side='right') - 1
+        if 0 <= nzi < n_z_cycles:
+            zi = nzi
+            zs = z_starts[zi]
+            ze = z_ends[zi]
+            zdir = z_dirs[zi]
+
+        
         for t_abs in range(xs, xe):
+            if t_abs >= ze:
+                nzi = zi + 1
+                if nzi < n_z_cycles and z_starts[nzi] <= t_abs < z_ends[nzi]:
+                    zi = nzi
+                    zs = z_starts[zi]
+                    ze = z_ends[zi]
+                    zdir = z_dirs[zi]
+
+            if zi == -1:
+                continue
+
             # get z index and weight
-            t_rel = t_abs - frame_t_start
-            if t_rel < 0 or t_rel >= len(z_idx_table):
-                continue
-            
-            zi = z_idx_table[t_rel]
-            if zi < 0:
-                continue
-            zw = z_weight_table[t_rel]
+            zi, zw = getMappingIdxWeight(t_abs, zs, ze, zdir, Z)
             
             # get x index and weight
             xi, xw = getMappingIdxWeight(t_abs, xs, xe, x_dir, W)
@@ -111,5 +113,7 @@ def XYZbinning_numba(
     
     mask = count > 1e-6
     volume[mask] /= count[mask]
+
+    print(f"[INFO] Binning completed: non-zero voxels = {np.sum(mask)}")
     
     return count, volume
