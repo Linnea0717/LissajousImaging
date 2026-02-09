@@ -20,7 +20,7 @@ from utils import (
 
 # from binning_cuda import (
 #     XYZbinning_cuda,
-# )
+# )w
 
 from binning_cuda_opt import (
     LissajousBinnerCUDA,

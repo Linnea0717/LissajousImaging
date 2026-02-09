@@ -28,7 +28,7 @@ def getMappingIdxWeight(t, t_start, t_end, direction, max_idx):
 
 
 @njit(fastmath=True, cache=True, parallel=True)
-def accumulateFrame(
+def accumulateVolume(
     volume, count, 
     signal,
     x_starts, x_ends, x_dirs,
@@ -37,7 +37,7 @@ def accumulateFrame(
     W, H, Z
 ):
     """
-    One frame accumulation kernel.
+    One volume accumulation kernel.
     """
     t_len = frame_t_end - frame_t_start
 
@@ -102,7 +102,7 @@ def XYZbinning_numba(
     frame_t_start = x_starts[0]
     frame_t_end = x_ends[-1]
     
-    accumulateFrame(
+    accumulateVolume(
         volume, count,
         signal,
         x_starts, x_ends, x_dirs,

@@ -22,3 +22,7 @@ conda install -c conda-forge numba numpy scipy tifffile -y
 ## how to run (choose one)
 1. run construciton*.py directly: run `python construction*.py` for usages
 2. use runner: run `python run.py -h` for usages
+
+
+## NOTE
+- Seems like I carelessly named all volumes as "frame"s. = =;

@@ -42,10 +42,10 @@ DROP_TAIL = True
 Z_START_THRESHOLD = 1000       # channel1 > 1000 is considered the start of a z oscillation cycle (trigger)
 
 
-def streamFramesGenerator(
+def streamVolumesGenerator(
     x_half_cycles,
     z_half_cycles,
-    lines_per_frame: int,
+    lines_per_volume: int,
     drop_before: int,
     drop_after: int,
     drop_tail: bool
@@ -57,15 +57,15 @@ def streamFramesGenerator(
     cur_z_idx = 0  # index for z half-cycles
     num_z_half_cycles = len(z_half_cycles)
 
-    while cur_x_idx + lines_per_frame <= total_x_cycles:
+    while cur_x_idx + lines_per_volume <= total_x_cycles:
 
-        # x half cycles for this frame
-        frame_x_half_cycles = x_half_cycles[cur_x_idx: cur_x_idx + lines_per_frame]
+        # x half cycles for this volume
+        frame_x_half_cycles = x_half_cycles[cur_x_idx: cur_x_idx + lines_per_volume]
         
         t_start = frame_x_half_cycles[0][0]
         t_end = frame_x_half_cycles[-1][1]
         
-        # z half cycles within this frame
+        # z half cycles within this volume
         frame_z_half_cycles = []
         
         # move cursor to the first possible overlapping z half-cycle
@@ -90,7 +90,7 @@ def streamFramesGenerator(
         
         # update counters
         frame_count += 1
-        cur_x_idx += lines_per_frame + drop_after
+        cur_x_idx += lines_per_volume + drop_after
 
 
 def processDataset(dataset_name: str, z_slices: int):
@@ -121,28 +121,28 @@ def processDataset(dataset_name: str, z_slices: int):
     print(f"[INFO] Mean x half-cycle length: {np.mean(x_half_cycles[:,1] - x_half_cycles[:,0]):.2f} samples")
     print(f"[INFO] Mean z half-cycle length: {np.mean(z_half_cycles[:,1] - z_half_cycles[:,0]):.2f} samples")
 
-    print(f"[INFO] Start streaming frames...")
+    print(f"[INFO] Start streaming volumes...")
     
-    frame_gen = streamFramesGenerator(
+    volume_gen = streamVolumesGenerator(
         x_half_cycles=x_half_cycles,
         z_half_cycles=z_half_cycles,
-        lines_per_frame=H,
+        lines_per_volume=H,
         drop_before=DROP_BEFORE_FIRST_FRAME,
         drop_after=DROP_AFTER_EACH_FRAME,
         drop_tail=DROP_TAIL
     )
     
-    for i, frame_x, frame_z in frame_gen:
-        print(f"[INFO] Processing Frame {i} | Z-cycles: {len(frame_z)}")
+    for i, volume_x, volume_z in volume_gen:
+        print(f"[INFO] Processing Volume {i} | Z-cycles: {len(volume_z)}")
 
-        x_starts = frame_x[:, 0].astype(np.int64)
-        x_ends = frame_x[:, 1].astype(np.int64)
-        x_dirs = frame_x[:, 2].astype(np.int32)
+        x_starts = volume_x[:, 0].astype(np.int64)
+        x_ends = volume_x[:, 1].astype(np.int64)
+        x_dirs = volume_x[:, 2].astype(np.int32)
         
-        frame_z = np.array(frame_z, dtype=np.int64)
-        z_starts = frame_z[:, 0]
-        z_ends = frame_z[:, 1]
-        z_dirs = frame_z[:, 2].astype(np.int32)
+        volume_z = np.array(volume_z, dtype=np.int64)
+        z_starts = volume_z[:, 0]
+        z_ends = volume_z[:, 1]
+        z_dirs = volume_z[:, 2].astype(np.int32)
         
         count, volume = XYZbinning_numba(
             x_starts=x_starts, x_ends=x_ends, x_dirs=x_dirs,
