@@ -82,18 +82,47 @@ def risingEdges2HalfCycles(
     return np.array(half_cycles, dtype=np.int64)
 
 
+def compute_shift_array(H, W, coefficients):
+    """
+    coefficients: [offset, shift, edge1, edge2, start, gap]
+    """
+    offset = coefficients[0]
+    shift_gain = coefficients[1]
+    edge1 = coefficients[2]
+    edge2 = coefficients[3]
+
+    f = 1 / (H * 2) 
+    t = np.arange(0, H)
+    
+    val_sin = np.sin(2 * np.pi * f * t - np.pi / 2)
+
+    y_sin4 = np.zeros(H)
+    mid = H // 2
+    
+    y_sin4[:mid] = (val_sin[:mid] ** 4) * edge1
+    y_sin4[mid:] = (val_sin[mid:] ** 4) * edge2
+    
+    final_shift = shift_gain * y_sin4 + offset
+    
+    scale_factor = W / 1024.0
+    final_shift_scaled = final_shift * scale_factor
+    
+    return final_shift_scaled.astype(np.float32)
+
+
 # =========================
 # Image Saving
 # =========================
 
-def simpleBaselineCorrection(
-    image: np.ndarray,
-    percentile: float = 5.0,
-):
-    baseline = np.percentile(image, percentile)
-    image_corr = image - baseline
-    image_corr[image_corr < 0] = 0
-    return image_corr
+def rescale(image, min_per=0.0, max_per=99.9, new_min=0.0, new_max=32767.0):
+    old_min = np.percentile(image, min_per)
+    old_max = np.percentile(image, max_per)
+    
+    image_norm = (image - old_min) / (old_max - old_min)
+    image_norm = np.clip(image_norm, 0.0, 1.0)
+    image_rescaled = image_norm * (new_max - new_min) + new_min
+
+    return image_rescaled
 
 def saveXYFrame_u16(
     image,
@@ -102,18 +131,12 @@ def saveXYFrame_u16(
 ):
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    maxv = np.percentile(image, 99.9)
-    minv = np.min(image)
-
-    image_norm = (image - minv) / (maxv - minv)
-    image_norm = np.clip(image_norm, 0.0, 1.0)
-
-    image_u16 = (image_norm * 65535).astype(np.uint16)
+    image_u16 = rescale(image).astype(np.uint16)
 
     save_path = save_dir / f"frame_{index:05d}.tiff"
     tiff.imwrite(save_path.as_posix(), image_u16, imagej=True, metadata={'axes': 'YX'})
 
-    print(f"[INFO] Saved frame {index} to {save_path}")
+    # print(f"[INFO] Saved frame {index} to {save_path}")
 
 def saveXYZVolume_u16(
     volume,
@@ -122,15 +145,9 @@ def saveXYZVolume_u16(
 ):
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    vmax = np.percentile(volume, 99.9)
-    vmin = np.min(volume)
-
-    vol_norm = (volume - vmin) / (vmax - vmin)
-    vol_norm = np.clip(vol_norm, 0.0, 1.0)
-
-    vol_u16 = (vol_norm * 65535).astype(np.uint16)
+    vol_u16 = rescale(volume).astype(np.uint16)
 
     save_path = save_dir / f"volume_{index:05d}.tiff"
     tiff.imwrite(save_path.as_posix(), vol_u16, imagej=True, metadata={'axes': 'ZYX'})
 
-    # print(f"[SAVE] {save_path} {index}  shape={vol_u16.shape}")
+    print(f"[SAVE] {save_path} {index}  shape={vol_u16.shape}")

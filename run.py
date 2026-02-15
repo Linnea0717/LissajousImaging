@@ -12,13 +12,13 @@ VERSION_MAP = {
     "v5": "ver5_cuda/construction_cuda.py",
 }
 
-def run_experiment(versions, datasets, z_slices, quiet=False):
+def run_experiment(versions, datasets, out_h, out_w, z_slices, quiet=False):
     base_dir = Path(__file__).parent.resolve()
 
     print("="*60)
     print(f"Versions: {versions}")
     print(f"Datasets: {datasets}")
-    print(f"Z-Slices: {z_slices}")
+    print(f"H x W x Z: {out_h} x {out_w} x {z_slices}")
     print(f'Quiet Mode: {"ON" if quiet else "OFF"}')
     print("="*60)
 
@@ -40,7 +40,9 @@ def run_experiment(versions, datasets, z_slices, quiet=False):
             sys.executable,
             str(script_path),
             "--dataset", *datasets,
-            "--z_slices", str(z_slices)
+            "--z_slices", str(z_slices),
+            "--out_h", str(out_h),
+            "--out_w", str(out_w)
         ]
 
         start_time = time.time()
@@ -73,11 +75,13 @@ if __name__ == "__main__":
         epilog=(
             "EXAMPLES:\n"
             "  1. Compare v2 and v3 on dataset 1:\n"
-            "     python run_benchmark.py -v v2 v3 -d 1\n\n"
+            "     python run.py -v v2 v3 -d 1\n\n"
             "  2. Run v3 on multiple datasets with custom Z-slices:\n"
-            "     python run_benchmark.py -v v3 -d 1 2 3 --z_slices 64\n\n"
+            "     python run.py -v v3 -d 1 2 3 -Z 64\n\n"
             "  3. Run in quiet mode (output only execution time):\n"
-            "     python run_benchmark.py -v v3 -d 1 -q\n"
+            "     python run.py -v v3 -d 1 -q\n"
+            "  4. Try different output sizes:\n"
+            "     python run.py -v v3 -d 1 -H 256 -W 256 -Z 10\n"
         )
     )
 
@@ -112,6 +116,22 @@ if __name__ == "__main__":
         help="Enable quiet mode. Suppresses standard output logs from\nthe subprocesses and displays only the final execution time."
     )
 
+    parser.add_argument(
+        "--h_out", "-H",
+        type=int,
+        default=512,
+        metavar="H",
+        help="Set the output image height (Default: 512)"
+    )
+
+    parser.add_argument(
+        "--w_out", "-W",
+        type=int,
+        default=512,
+        metavar="W",
+        help="Set the output image width (Default: 512)"
+    )
+
     args = parser.parse_args()
 
-    run_experiment(args.versions, args.dataset, args.z_slices, args.quiet)
+    run_experiment(args.versions, args.dataset, args.h_out, args.w_out, args.z_slices, args.quiet)
