@@ -4,5 +4,6 @@ __pycache__/
 20251229data/
 old_tools/
 output/
+comp/
 *.pyc
 performance.txt
