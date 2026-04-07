@@ -11,7 +11,8 @@ VERSION_MAP = {
     "v4": "ver4_online_idx/construction_stream.py",
     "v5": "ver5_cuda/construction_cuda.py",
     "v6": "ver6_volume/construction.py",
-    "v7": "ver7_chunk/construction.py"
+    "v7": "ver7_chunk/construction.py",
+    "v8": "ver8/construction.py"
 }
 
 def run_experiment(
