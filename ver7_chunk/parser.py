@@ -24,7 +24,7 @@ class XHalfCycleParser:
         return full half-cycles, in shape (N, 3), columns = [start, end, dir]
         """
 
-        # concatenate with last value to find transitions, if exists
+        # ---- method 1: concatenate with last value to find transitions, if exists ---
         if self.last_trig0_val is not None:
             extended = np.concatenate([[self.last_trig0_val], trig0])
         else:
@@ -32,6 +32,16 @@ class XHalfCycleParser:
  
         # find all transitions in this chunk (local index)
         transitions_local = np.flatnonzero(extended[1:] != extended[:-1])
+
+
+        ## ---- method 2: directly compare with last value in the last trunk ----
+        # inner_trans = np.flatnonzero(trig0[1:] != trig0[:-1]) + 1
+
+        # if self.last_trig0_val is not None and trig0[0] != self.last_trig0_val:
+        #     transitions_local = np.concatenate([[0], inner_trans])
+        # else:
+        #     transitions_local = inner_trans
+
         transitions_abs   = transitions_local + sample_offset
 
         self.last_trig0_val = int(trig0[-1])
@@ -90,13 +100,22 @@ class ZHalfCycleParser:
 
         above = tag.astype(np.int32) > self.threshold
  
-        # ---- extend with last value (above or not) ----
+        # ---- method1: extend with last value (above or not) ----
         if self.last_above is not None:
             extended = np.concatenate([[self.last_above], above])
         else:
             extended = above
 
         rising_local  = np.flatnonzero(~extended[:-1] & extended[1:])
+
+        ## ---- method2: directly compare with last value in the last trunk ----
+        # inner_rising = np.flatnonzero(~above[:-1] & above[1:]) + 1
+
+        # if self.last_above is not None and (not self.last_above) and bool(above[0]):
+        #     rising_local = np.concatenate([[0], inner_rising])
+        # else:
+        #     rising_local = inner_rising
+
         rising_abs    = rising_local + sample_offset
 
         self.last_above = bool(above[-1])
@@ -146,8 +165,9 @@ class StreamingVolumeProcessor:
  
         # z half-cycle pool: store all z half-cycles that may overlap with future x half-cycles
         self._z_pool = []
+
  
-    def feed(self, x_hc: np.ndarray, z_hc: np.ndarray, PMT: np.ndarray):
+    def feed(self, x_hc: np.ndarray, z_hc: np.ndarray, pmt_chunk: np.ndarray, signal_offset: int):
         """
         x_hc : shape (Nx, 3)  full x half-cycle, absolute index, columns = [start, end, dir]
         z_hc : shape (Nz, 3)  full z half-cycle, absolute index, columns = [start, end, dir]
@@ -182,7 +202,8 @@ class StreamingVolumeProcessor:
             # accumulate volume for this batch
             if len(batch_z) > 0:
                 feed_chunk(
-                    self.volume, self.count, PMT,
+                    self.volume, self.count, 
+                    pmt_chunk, signal_offset,
                     batch_x, batch_z, self.shifts,
                     self.out_h, self.out_w, self.z_slices,
                     self.H_scan, self.W_scan,

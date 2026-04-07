@@ -3,15 +3,28 @@ from pathlib import Path
 import tifffile as tiff
 
 # =========================
+# File Reader
+# =========================
+def file_chunk_generator(path0, path1, chunk_size):
+    raw0 = read_raw_u16_mmap(path0)
+    raw1 = read_raw_u16_mmap(path1)
+    total = len(raw0)
+    offset = 0
+    while offset < total:
+        end = min(offset + chunk_size, total)
+        yield offset, raw0[offset:end], raw1[offset:end]
+        offset = end
+
+# =========================
 # Data extraction
 # =========================
 def extract_trigs_and_data14_signed(raw_u16: np.ndarray):
     trig0 = (raw_u16 >> 15) & 0x1
-    trig1 = (raw_u16 >> 14) & 0x1
+    # trig1 = (raw_u16 >> 14) & 0x1
     data14_u = raw_u16 & 0x3FFF
     data14   = data14_u.astype(np.int16)
     data14   = np.where((data14_u & 0x2000) != 0, data14 - 0x4000, data14)
-    return trig0.astype(np.uint8), trig1.astype(np.uint8), data14
+    return trig0.astype(np.uint8), data14
 
 
 def read_raw_u16_mmap(path: Path, endian="<u2") -> np.ndarray:

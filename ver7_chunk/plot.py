@@ -1,18 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-dir = "output/ver7/1/x512y512z31_coo/"
+dir = "output/ver7/1/x1024y1024z31_coo/"
 data = np.load(dir + 'vol_0000.npz')
-[Z, H, W] = data['shape'].tolist()
+Z, H, W = data['shape']
 dense = np.zeros((Z, H, W), dtype=np.float32)
 dense[data['z'], data['y'], data['x']] = data['signal']
-
-fill_rate = 100 * len(data['signal']) / (Z * H * W)
-
-print(f"Volume shape: {Z} x {H} x {W}")
-print(f"Non-zero voxels: {len(data['signal'])}")
-print(f"Fill rate: {fill_rate:.4f}%")
-
 
 for z in [0, 15, 30]:
     vmin = np.percentile(dense[z], 1)

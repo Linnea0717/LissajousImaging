@@ -14,20 +14,6 @@ VERSION_MAP = {
     "v7": "ver7_chunk/construction.py"
 }
 
-import argparse
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-VERSION_MAP = {
-    "v1": "ver1_numpy/construction_numpy.py",
-    "v2": "ver2_numba/construction_numba.py",
-    "v3": "ver3_numba_streaming/construction_stream.py",
-    "v4": "ver4_online_idx/construction_stream.py",
-    "v5": "ver5_cuda/construction_cuda.py",
-}
-
 def run_experiment(
     versions,
     datasets,

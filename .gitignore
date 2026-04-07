@@ -7,3 +7,4 @@ output/
 comp/
 *.pyc
 performance.txt
+progress_summary.md

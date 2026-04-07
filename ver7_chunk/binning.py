@@ -38,6 +38,7 @@ def getMappingIdxWeight(t, t_start, t_end, direction, max_idx, shift=0.0):
 def accumulateVolume(
     volume, count, 
     signal,
+    signal_offset,
     x_starts, x_ends, x_dirs,
     z_starts, z_ends, z_dirs,
     W_out, H_out, Z,
@@ -100,7 +101,7 @@ def accumulateVolume(
             # get x index and weight
             x_idx, xw = getMappingIdxWeight(t_abs, xs, xe, x_dir, W_out, shift)
             
-            val = signal[t_abs]
+            val = signal[t_abs - signal_offset]
             val = max(0.0, -val)
             
             weight = xw * zw
@@ -118,6 +119,7 @@ def make_accumulators(Z, H_out, W_out):
     return volume, count
 
 def feed_chunk(volume, count, signal,
+               signal_offset,
                x_chunk, z_chunk, shifts,
                H_out, W_out, Z, H_scan, W_scan,
                yi_offset):
@@ -137,6 +139,7 @@ def feed_chunk(volume, count, signal,
 
     accumulateVolume(
         volume, count, signal,
+        signal_offset,
         x_starts, x_ends, x_dirs,
         z_starts, z_ends, z_dirs,
         W_out, H_out, Z, shifts, W_scan, H_scan,

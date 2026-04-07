@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 from utils import (
-    read_raw_u16_mmap,
+    file_chunk_generator,
     extract_trigs_and_data14_signed,
     compute_shift_array,
 )
@@ -66,17 +66,8 @@ def processDataset(
 
     time_record = {}
 
-    # ==== mmap .bin ====
-    load_start = time.time()
-    raw_u16_0 = read_raw_u16_mmap(raw0_path, endian="<u2")
-    raw_u16_1 = read_raw_u16_mmap(raw1_path, endian="<u2")
-    total_samples = len(raw_u16_0)
-    time_record['mmap'] = time.time() - load_start
-    print(f"[INFO] Dataset {dataset_name}: {total_samples} samples")
-
     # ==== extrace trigs ====
     extract_start = time.time()
-    _, _, PMT = extract_trigs_and_data14_signed(raw_u16_0)
 
     time_record['extract_pmt'] = time.time() - extract_start
  
@@ -96,21 +87,23 @@ def processDataset(
 
     process_start = time.time()
     n_volumes_saved = 0
-    offset = 0
+    pmt_prev   = np.zeros(0, dtype=np.int16)
+    prev_offset = 0
+
+    chunk_reader = file_chunk_generator(raw0_path, raw1_path, chunk_samples)
  
-    while offset < total_samples:
-        end = min(offset + chunk_samples, total_samples)
+    for offset, chunk0, chunk1 in chunk_reader:
  
-        chunk0 = raw_u16_0[offset:end]
-        chunk1 = raw_u16_1[offset:end]
- 
-        trig0, _, _   = extract_trigs_and_data14_signed(chunk0)
-        _,     _, tag = extract_trigs_and_data14_signed(chunk1)
+        trig0, pmt_cur   = extract_trigs_and_data14_signed(chunk0)
+        _,     tag = extract_trigs_and_data14_signed(chunk1)
  
         x_hc = x_parser.feed(trig0, offset)
         z_hc = z_parser.feed(tag,   offset)
+
+        pmt_window = np.concatenate([pmt_prev, pmt_cur])
+        window_offset = prev_offset
  
-        completed = vol_proc.feed(x_hc, z_hc, PMT)
+        completed = vol_proc.feed(x_hc, z_hc, pmt_window, window_offset)
  
         for vol in completed:
             np.savez_compressed(
@@ -120,8 +113,9 @@ def processDataset(
                 shape=vol['shape'],
             )
             n_volumes_saved += 1
- 
-        offset = end
+
+        pmt_prev = pmt_cur
+        prev_offset = offset
  
     time_record['streaming'] = time.time() - process_start
     print(f"[INFO] Done. {n_volumes_saved} volumes saved to {save_base}")
