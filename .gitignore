@@ -5,6 +5,7 @@ __pycache__/
 old_tools/
 output/
 comp/
+test/
 *.pyc
 performance.txt
 progress_summary.md
