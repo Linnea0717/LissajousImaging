@@ -1,113 +1,123 @@
+
 import numpy as np
-from numba import njit, prange
-
+from numba import njit
+ 
+# =========================
+# Lookup Table
+# =========================
+ 
+LUT_SIZE = 4096
+ 
+_lut_cos = np.empty(0, dtype=np.float32)
+_lut_sin = np.empty(0, dtype=np.float32)
+ 
+def rebuild_lut(size: int = LUT_SIZE):
+    global LUT_SIZE, _lut_cos, _lut_sin
+    LUT_SIZE = size
+    theta      = np.linspace(0.0, np.pi, size, dtype=np.float64)
+    _lut_cos   = np.cos(theta).astype(np.float32)
+    _lut_sin   = np.sqrt(np.maximum(0.0, 1.0 - _lut_cos.astype(np.float64) ** 2)).astype(np.float32)
+ 
+rebuild_lut(LUT_SIZE)
+ 
+ 
+# =========================
+# Numba Kernels
+# =========================
+ 
 @njit(fastmath=True, cache=True)
-def getMappingIdxWeight(t, t_start, t_end, direction, max_idx, shift=0.0):
+def getMappingIdxWeight_lut(phase, direction, max_idx, shift, lut_cos, lut_sin):
     """
-    Get the index and weight for a time point within a half-cycle.
-    Using cosine mapping.
+    LUT mapping：use phase（0~1） to look up cos and sin values, then compute the final pixel index and weight
+
+    phase: relative position within the half-cycle, range [0, 1]
     """
-    total_len = t_end - t_start
-    if total_len == 0: return 0, 0.0
-    
-    phase = (t - t_start) / total_len
-    theta = np.pi * phase
+    lut_size = len(lut_cos)
+ 
+    # phase → LUT index
     if direction == -1:
-        theta = np.pi - theta
-        
-    x_phys = np.cos(theta)
-
-    xws = np.sqrt(max(0.0, 1.0 - x_phys*x_phys))
-    
+        phase = 1.0 - phase
+    lut_idx = int(phase * (lut_size - 1) + 0.5)   # round
+    if lut_idx >= lut_size: lut_idx = lut_size - 1
+    if lut_idx < 0:         lut_idx = 0
+ 
+    x_phys = lut_cos[lut_idx]
+    weight = lut_sin[lut_idx]
+ 
     x_norm = (x_phys + 1.0) * 0.5
-    x_pix = x_norm * max_idx
-
+    x_pix  = x_norm * max_idx
+ 
     if direction == +1:
         x_pix -= shift
     else:
         x_pix += shift
-
-    xis = int(round(x_pix))
-    if xis >= max_idx: xis = max_idx - 1
-    if xis < 0: xis = 0
-    
-    return xis, xws
-
-
-@njit(fastmath=True, cache=True, parallel=True)
+ 
+    idx = int(x_pix + 0.5)   # round
+    if idx >= max_idx: idx = max_idx - 1
+    if idx < 0:        idx = 0
+ 
+    return idx, weight
+ 
+ 
+@njit(fastmath=True, cache=True)
 def accumulateVolume(
-    volume, count, 
-    signal,
-    signal_offset,
+    volume, count,
+    signal, signal_offset,
     x_starts, x_ends, x_dirs,
     z_starts, z_ends, z_dirs,
     W_out, H_out, Z,
-    shifts,
-    W_scan, H_scan,
+    shifts, W_scan, H_scan,
     yi_offset,
+    lut_cos, lut_sin,
 ):
-    """
-    One volume accumulation kernel.
-    """
-
     n_z_cycles = len(z_starts)
     n_x_cycles = len(x_starts)
+    scale_x    = W_out / W_scan
+ 
+    if n_z_cycles > 0:
+        zi, zs, ze, zdir = 0, z_starts[0], z_ends[0], z_dirs[0]
+    else:
+        return
 
-    scale_x = W_out / W_scan
-    
-    for yi in prange(n_x_cycles):
-        xs = x_starts[yi]
-        xe = x_ends[yi]
+    for yi in range(n_x_cycles):
+        xs    = x_starts[yi]
+        xe    = x_ends[yi]
         x_dir = x_dirs[yi]
-        
-        zi, zs, ze, zdir = -1, 0, 0, 0
-
-        shift = 0.0
+        x_len = xe - xs
+ 
+ 
         abs_yi = yi + yi_offset
-        if abs_yi < len(shifts):
-            shift = shifts[abs_yi]
-
-        shift = shift * scale_x
-
+        shift  = shifts[abs_yi] * scale_x if abs_yi < len(shifts) else 0.0
+ 
         y_norm = (abs_yi + 0.5) / H_scan
-        y_idx = int(y_norm * H_out)
-
+        y_idx  = int(y_norm * H_out)
         if y_idx >= H_out: y_idx = H_out - 1
-        if y_idx < 0: y_idx = 0
-
-        nzi = np.searchsorted(z_starts, xs, side='right') - 1
-        if 0 <= nzi < n_z_cycles:
-            zi = nzi
-            zs = z_starts[zi]
-            ze = z_ends[zi]
-            zdir = z_dirs[zi]
-
-        
+        if y_idx < 0:      y_idx = 0
+ 
+ 
         for t_abs in range(xs, xe):
-            if t_abs >= ze:
-                nzi = zi + 1
-                if nzi < n_z_cycles and z_starts[nzi] <= t_abs < z_ends[nzi]:
-                    zi = nzi
-                    zs = z_starts[zi]
-                    ze = z_ends[zi]
-                    zdir = z_dirs[zi]
+ 
+            while zi < n_z_cycles and t_abs >= z_ends[zi]:
+                zi += 1
+                if zi < n_z_cycles:
+                    zs, ze, zdir = z_starts[zi], z_ends[zi], z_dirs[zi]
+ 
+            if zi >= n_z_cycles:
+                break
+ 
+            val = max(0.0, -float(signal[t_abs - signal_offset]))
+ 
+            z_len   = ze - zs
+            z_phase = (t_abs - zs) / z_len if z_len > 0 else 0.0
+            z_idx, zw = getMappingIdxWeight_lut(z_phase, zdir, Z,    0.0,   lut_cos, lut_sin)
 
-            if zi == -1:
-                continue
 
-            # get z index and weight
-            z_idx, zw = getMappingIdxWeight(t_abs, zs, ze, zdir, Z, 0.0)
-            
-            # get x index and weight
-            x_idx, xw = getMappingIdxWeight(t_abs, xs, xe, x_dir, W_out, shift)
-            
-            val = signal[t_abs - signal_offset]
-            val = max(0.0, -val)
-            
+            x_phase = (t_abs - xs) / x_len if x_len > 0 else 0.0
+            x_idx, xw = getMappingIdxWeight_lut(x_phase, x_dir, W_out, shift, lut_cos, lut_sin)
+ 
             weight = xw * zw
-            
             volume[z_idx, y_idx, x_idx] += val * weight
-            count[z_idx, y_idx, x_idx] += weight
+            count [z_idx, y_idx, x_idx] += weight
 
 
 def make_accumulators(Z, H_out, W_out):
@@ -143,7 +153,8 @@ def feed_chunk(volume, count, signal,
         x_starts, x_ends, x_dirs,
         z_starts, z_ends, z_dirs,
         W_out, H_out, Z, shifts, W_scan, H_scan,
-        yi_offset
+        yi_offset,
+        _lut_cos, _lut_sin,
     )
 
 def finalize_COO(volume, count):

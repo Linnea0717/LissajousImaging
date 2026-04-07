@@ -164,3 +164,19 @@ def saveXYZVolume_u16(
     tiff.imwrite(save_path.as_posix(), vol_u16, imagej=True, metadata={'axes': 'ZYX'})
 
     print(f"[SAVE] {save_path} {index}  shape={vol_u16.shape}")
+
+
+def print_timing_summary(t: dict, n_chunks: int, n_volumes: int):
+    total = sum(t.values())
+    print("\n" + "=" * 60)
+    print(f"  TIMING SUMMARY  ({n_chunks} chunks, {n_volumes} volumes)")
+    print("=" * 60)
+    print(f"  {'Step':<30} {'Total (s)':>10}  {'Per chunk (ms)':>15}  {'%':>6}")
+    print("-" * 60)
+    for key, val in sorted(t.items(), key=lambda x: -x[1]):
+        per_chunk_ms = val / n_chunks * 1000 if n_chunks > 0 else 0
+        pct = val / total * 100 if total > 0 else 0
+        print(f"  {key:<30} {val:>10.3f}  {per_chunk_ms:>15.2f}  {pct:>5.1f}%")
+    print("-" * 60)
+    print(f"  {'TOTAL':<30} {total:>10.3f}")
+    print("=" * 60 + "\n")

@@ -1,75 +1,48 @@
+import time
 import numpy as np
+from collections import defaultdict
 
 from binning import (
     make_accumulators,
     feed_chunk,
-    finalize_COO
+    finalize_COO,
 )
 
+
 class XHalfCycleParser:
-    """
-    input: a segment of trig0 data
-    output: x half-cyclers in this segment, storing fragmented half-cycles for later input
-    """
- 
     def __init__(self):
         self.last_trig0_val = None
         self.pending_start  = None
         self.pending_dir    = None
- 
+
     def feed(self, trig0: np.ndarray, sample_offset: int):
-        """
-        sample_offset: the absolute index of the first sample in this chunk
-
-        return full half-cycles, in shape (N, 3), columns = [start, end, dir]
-        """
-
-        # ---- method 1: concatenate with last value to find transitions, if exists ---
         if self.last_trig0_val is not None:
             extended = np.concatenate([[self.last_trig0_val], trig0])
         else:
             extended = trig0
- 
-        # find all transitions in this chunk (local index)
+
         transitions_local = np.flatnonzero(extended[1:] != extended[:-1])
-
-
-        ## ---- method 2: directly compare with last value in the last trunk ----
-        # inner_trans = np.flatnonzero(trig0[1:] != trig0[:-1]) + 1
-
-        # if self.last_trig0_val is not None and trig0[0] != self.last_trig0_val:
-        #     transitions_local = np.concatenate([[0], inner_trans])
-        # else:
-        #     transitions_local = inner_trans
-
         transitions_abs   = transitions_local + sample_offset
-
         self.last_trig0_val = int(trig0[-1])
 
- 
-        # ---- add pending transition from last chunk if exists ----
         if self.pending_start is not None:
             all_trans = np.concatenate([[self.pending_start], transitions_abs])
         else:
             all_trans = transitions_abs
- 
-        # ---- match transitions in pairs ----
+
         half_cycles = []
         for i in range(len(all_trans) - 1):
             s = int(all_trans[i])
             e = int(all_trans[i + 1])
             s_local = s - sample_offset
             if 0 <= s_local < len(trig0):
-                # start position within this chunk → determine direction by trig0 value at start
                 direction = +1 if trig0[s_local] == 1 else -1
             else:
-                # start position outside this chunk → use pending direction from last chunk
                 direction = self.pending_dir
             half_cycles.append((s, e, direction))
 
- 
         if len(all_trans) > 0:
-            last = int(all_trans[-1])
+            last       = int(all_trans[-1])
             last_local = last - sample_offset
             if 0 <= last_local < len(trig0):
                 self.pending_dir = +1 if trig0[last_local] == 1 else -1
@@ -78,144 +51,122 @@ class XHalfCycleParser:
         if len(half_cycles) == 0:
             return np.empty((0, 3), dtype=np.int64)
         return np.array(half_cycles, dtype=np.int64)
- 
- 
-class ZHalfCycleParser:
-    """
-    input: a segment of trig1 data
-    output: z half-cyclers in this segment, storing fragmented half-cycles for later input
-    """
- 
-    def __init__(self, threshold: int = 1000):
-        self.threshold       = threshold
-        self.last_above      = None
-        self.pending_edge    = None 
- 
-    def feed(self, tag: np.ndarray, sample_offset: int):
-        """
-        sample_offset: the absolute index of the first sample in this chunk 
-        
-        return full half-cycles, in shape (N, 3), columns = [start, end, dir]
-        """
 
+
+class ZHalfCycleParser:
+    def __init__(self, threshold: int = 1000):
+        self.threshold    = threshold
+        self.last_above   = None
+        self.pending_edge = None
+
+    def feed(self, tag: np.ndarray, sample_offset: int):
         above = tag.astype(np.int32) > self.threshold
- 
-        # ---- method1: extend with last value (above or not) ----
+
         if self.last_above is not None:
             extended = np.concatenate([[self.last_above], above])
         else:
             extended = above
 
-        rising_local  = np.flatnonzero(~extended[:-1] & extended[1:])
-
-        ## ---- method2: directly compare with last value in the last trunk ----
-        # inner_rising = np.flatnonzero(~above[:-1] & above[1:]) + 1
-
-        # if self.last_above is not None and (not self.last_above) and bool(above[0]):
-        #     rising_local = np.concatenate([[0], inner_rising])
-        # else:
-        #     rising_local = inner_rising
-
-        rising_abs    = rising_local + sample_offset
-
+        rising_local = np.flatnonzero(~extended[:-1] & extended[1:])
+        rising_abs   = rising_local + sample_offset
         self.last_above = bool(above[-1])
- 
+
         if self.pending_edge is not None:
             all_edges = np.concatenate([[self.pending_edge], rising_abs])
         else:
             all_edges = rising_abs
- 
-        # ---- match edges in pairs ----
-        half_cycles = []
 
+        half_cycles = []
         for i in range(len(all_edges) - 1):
             s = int(all_edges[i])
             e = int(all_edges[i + 1])
             m = (s + e) // 2
             half_cycles.append((s, m, +1))
             half_cycles.append((m, e, -1))
- 
+
         if len(all_edges) > 0:
             self.pending_edge = int(all_edges[-1])
- 
+
         if len(half_cycles) == 0:
             return np.empty((0, 3), dtype=np.int64)
         return np.array(half_cycles, dtype=np.int64)
-    
+
 
 class StreamingVolumeProcessor:
-    """
-    streaming processing of x and z half-cycles to produce volumes in COO format
-    """
- 
     def __init__(self, lines_per_volume, z_slices, out_h, out_w,
                  H_scan, W_scan, shifts):
         self.lines_per_volume = lines_per_volume
         self.z_slices  = z_slices
         self.out_h     = out_h
-        self.out_w     = out_w  
+        self.out_w     = out_w
         self.H_scan    = H_scan
         self.W_scan    = W_scan
         self.shifts    = shifts
- 
 
         self.volume, self.count = make_accumulators(z_slices, out_h, out_w)
-        self.x_lines_accumulated = 0   # number of x lines accumulated in current volume
+        self.x_lines_accumulated = 0
         self.volume_index = 0
- 
-        # z half-cycle pool: store all z half-cycles that may overlap with future x half-cycles
         self._z_pool = []
 
- 
-    def feed(self, x_hc: np.ndarray, z_hc: np.ndarray, pmt_chunk: np.ndarray, signal_offset: int):
-        """
-        x_hc : shape (Nx, 3)  full x half-cycle, absolute index, columns = [start, end, dir]
-        z_hc : shape (Nz, 3)  full z half-cycle, absolute index, columns = [start, end, dir]
-        PMT  : shape (total_samples,)  signal array for the whole scan
-        
-        return a list of completed volumes in COO format, each is a dict with keys
-              {'index', 'z', 'y', 'x', 'signal', 'shape'}
-        """
+    # ── original feed ────────────────────────────
+    def feed(self, x_hc, z_hc, pmt_chunk, signal_offset):
+        completed, _ = self.feed_timed(x_hc, z_hc, pmt_chunk, signal_offset)
+        return completed
+
+    # ── timed feed ───────────────
+    def feed_timed(self, x_hc: np.ndarray, z_hc: np.ndarray,
+                   pmt_chunk: np.ndarray, signal_offset: int):
+        t = defaultdict(float)
         completed = []
 
-        # add new z half-cycles to the pool
+        # ── Step 6a: update z_pool ─────────────────────────────────────────
+        t0 = time.perf_counter()
         if len(z_hc) > 0:
             self._z_pool.extend(z_hc.tolist())
- 
+        t['a_z_pool_update'] += time.perf_counter() - t0
+
         if len(x_hc) == 0:
-            return completed
- 
-        # process x half-cycles line by line; finalise when a volume is filled
+            return completed, dict(t)
+
         i = 0
         while i < len(x_hc):
             space_left = self.lines_per_volume - self.x_lines_accumulated
-            batch_x = x_hc[i : i + space_left]
- 
-            # find overlapping z half-cycles for this batch of x half-cycles
+            batch_x    = x_hc[i : i + space_left]
+
+            # ── Step 6b: z_pool filter ──
+            t0 = time.perf_counter()
             t_start = int(batch_x[0,  0])
             t_end   = int(batch_x[-1, 1])
             batch_z = np.array(
                 [zc for zc in self._z_pool if zc[1] >= t_start and zc[0] <= t_end],
                 dtype=np.int64
             )
- 
-            # accumulate volume for this batch
+            t['b_z_pool_filter'] += time.perf_counter() - t0
+
+            # ── Step 6c: accumulateVolume ────────────────────
+            t0 = time.perf_counter()
             if len(batch_z) > 0:
                 feed_chunk(
-                    self.volume, self.count, 
+                    self.volume, self.count,
                     pmt_chunk, signal_offset,
                     batch_x, batch_z, self.shifts,
                     self.out_h, self.out_w, self.z_slices,
                     self.H_scan, self.W_scan,
-                    yi_offset=self.x_lines_accumulated
+                    yi_offset=self.x_lines_accumulated,
                 )
- 
+            t['c_accumulate'] += time.perf_counter() - t0
+
             self.x_lines_accumulated += len(batch_x)
             i += len(batch_x)
- 
-            # volume is filled, finalize COO and reset for next volume
+
+            # ── fill volume → finalize + reset ───────────────────────────
             if self.x_lines_accumulated >= self.lines_per_volume:
+
+                # ── Step 6d: finalize COO ────────────────────────────────
+                t0 = time.perf_counter()
                 z_c, y_c, x_c, vals = finalize_COO(self.volume, self.count)
+                t['d_finalize_COO'] += time.perf_counter() - t0
+
                 completed.append({
                     'index':  self.volume_index,
                     'z':      z_c,
@@ -228,13 +179,14 @@ class StreamingVolumeProcessor:
                 print(f"[VOL {self.volume_index}] "
                       f"{len(vals)} non-zero voxels "
                       f"({100*len(vals)/(self.z_slices*self.out_h*self.out_w):.1f}% fill)")
- 
+
+                # ── Step 6e: reset accumulators ──────────────────────────
+                t0 = time.perf_counter()
                 self.volume_index += 1
                 self.volume, self.count = make_accumulators(
                     self.z_slices, self.out_h, self.out_w)
                 self.x_lines_accumulated = 0
- 
-                # remove z half-cycles that have ended before t_end
                 self._z_pool = [zc for zc in self._z_pool if zc[1] > t_end]
- 
-        return completed
+                t['e_reset'] += time.perf_counter() - t0
+
+        return completed, dict(t)
