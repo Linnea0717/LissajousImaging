@@ -1,32 +1,26 @@
 """
 construction.py
 ===============
-模擬：把 raw .bin 資料切成 half-cycle，一個一個餵進 VolumeProcessor。
 
-FPGA 廠商不需要參考這個檔案。
-FPGA 廠商處理 raw data → half-cycle，再呼叫：
-    proc.feed_z_halfcycle(zs, ze, z_dir)
-    result = proc.feed_x_halfcycle(xs, xe, x_dir, signal, signal_offset)
-
-輸出在 Step 5b 的 for 迴圈內：每個 x half-cycle 完成後立刻拿到該段 COO（coordinate list），
-FPGA 整合時在此處改成 stream 到 DGX SPARK。
-目前模擬：收集到 vol_buf，volume 填滿後存成 .npz。
+1. Read full raw data into memory once.
+2. Iterate sample by sample, detecting trigger edges and feed sample one by one,
+    or feed in batches between events (faster, for reference only).
 """
 
 import argparse
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
 import numpy as np
 import time
 
 from utils import (
-    file_chunk_generator,
+    read_raw_u16_mmap,
     extract_trigs_and_data14_signed,
     compute_shift_array,
     print_timing_summary,
 )
-from parser import XHalfCycleParser, ZHalfCycleParser
-from processor import VolumeProcessor
+from processor import StreamingVolumeProcessor
 
 # =========================
 # Parameters
@@ -34,24 +28,23 @@ from processor import VolumeProcessor
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT    = PROJECT_ROOT / "20251229data"
-SAVE_ROOT    = PROJECT_ROOT / "output" / "ver8"
+SAVE_ROOT    = PROJECT_ROOT / "output" / "cur"
 
 SCAN_W        = 1024
 SCAN_H        = 1024
 Z_SLICES      = 31
 Z_THRESHOLD   = 1000
 COEFFS        = [0, 0, 0, 0, 0, 0]
-CHUNK_SAMPLES = 100_000
 DROP_BEFORE   = 20
 DROP_AFTER    = 20
+DROP_TAIL     = True
 
-# =========================
-# Time Complexity
-# =========================
-# N: number of samples in raw data
-# C: chunk size (number of samples per chunk)
-# Nx: number of x half-cycles
-# Nz: number of z half-cycles
+X_FREQ        = 8_000
+Z_FREQ        = 192_000
+SAMPLING_RATE    = 1_000_000_000
+NOMINAL_X_LEN    = SAMPLING_RATE / (X_FREQ * 2)  # theoretical x halfcycle length
+NOMINAL_Z_LEN    = SAMPLING_RATE / Z_FREQ        # theoretical z cycle length
+ESTIMATOR_WINDOW = 6
 
 
 # =========================
@@ -59,16 +52,18 @@ DROP_AFTER    = 20
 # =========================
 
 def processDataset(
-    dataset_name: str,
-    z_slices: int,
-    scan_w: int,
-    scan_h: int,
-    out_w: int,
-    out_h: int,
-    data_root: Path,
-    save_root: Path,
-    chunk_samples: int = CHUNK_SAMPLES,
-):
+    dataset_name:  str,
+    z_slices:      int,
+    scan_w:        int,
+    scan_h:        int,
+    out_w:         int,
+    out_h:         int,
+    data_root:     Path,
+    save_root:     Path,
+    mode:          str,
+    nominal_x_len: float = NOMINAL_X_LEN,
+    nominal_z_period: float = NOMINAL_Z_LEN,
+) -> dict:
     data_dir  = data_root / dataset_name
     raw0_path = data_dir / "raw_data_0.bin"
     raw1_path = data_dir / "raw_data_1.bin"
@@ -78,107 +73,157 @@ def processDataset(
     save_base = save_root / dataset_name / f"x{out_w}y{out_h}z{z_slices}_coo"
     save_base.mkdir(parents=True, exist_ok=True)
 
+    t = defaultdict(float)
+
+    # ── Step 1: read raw data ────────────────────────────────────────
+    t0 = time.perf_counter()
+    raw0      = read_raw_u16_mmap(raw0_path)
+    raw1      = read_raw_u16_mmap(raw1_path)
+    n_samples = len(raw0)
+    print(f"[INFO] Dataset {dataset_name}: {n_samples:,} samples")
+    t['1_read'] += time.perf_counter() - t0
+
+    # ── Step 2: extract trig0, PMT, TAG ──────────────────────────────
+    t0 = time.perf_counter()
+    trig0, pmt = extract_trigs_and_data14_signed(raw0)
+    _,     tag = extract_trigs_and_data14_signed(raw1)
+    t['2_unpack'] += time.perf_counter() - t0
+
+    # ── Step 3: initialise processor ──────────────────────────────────────
     shifts = compute_shift_array(scan_h, scan_w, COEFFS)
-
-    # ── raw data → half-cycle parsers ───────────────────────────
-    x_parser = XHalfCycleParser()
-    z_parser = ZHalfCycleParser(threshold=Z_THRESHOLD)
-
-    # ── main ─────────────────────────────────────────────────────────
-    proc = VolumeProcessor(
+    proc = StreamingVolumeProcessor(
         z_slices         = z_slices,
         out_h            = out_h,
         out_w            = out_w,
         H_scan           = scan_h,
         W_scan           = scan_w,
         shifts           = shifts,
+        nominal_x_len    = nominal_x_len,
+        nominal_z_period    = nominal_z_period,
+        estimator_window = ESTIMATOR_WINDOW,
         lines_per_volume = scan_h,
         drop_before      = DROP_BEFORE,
         drop_after       = DROP_AFTER,
     )
 
-    t            = defaultdict(float)
-    n_chunks     = 0
-    n_xcycles    = 0
-    n_coo_out    = 0
     vol_buf: dict[int, list] = defaultdict(list)
+    n_xcycles = 0
+    n_coo_out = 0
 
-    pmt_prev    = np.zeros(0, dtype=np.int16)
-    prev_offset = 0
+    # ── Step 4: sample-by-sample edge detection ──────────────────────
+    #   prev_trig0   : last seen x trigger level (0 or 1)
+    #   prev_z_above : whether last sample was above Z_THRESHOLD
+    #   seg_start    : first sample of the current unprocessed segment; for batch feeding
+    #   z_midpoint   : sample index where the -1 halfcycle should start
 
-    print(f"[INFO] Dataset {dataset_name}: "
-          f"{raw0_path.stat().st_size // 2:,} samples")
+    prev_trig0   = int(trig0[0])
+    prev_z_above = int(tag[0]) > Z_THRESHOLD
+    z_midpoint   = None   # int | None
+    seg_start    = 0
 
-    for offset, chunk0, chunk1 in file_chunk_generator(
-            raw0_path, raw1_path, chunk_samples):
+    t0 = time.perf_counter()
+    # # Batch version
+    for i in range(n_samples):
+        cur_trig0   = int(trig0[i])
+        cur_z_above = int(tag[i]) > Z_THRESHOLD
 
-        # ── Step 1: extract trig0 + PMT - O(N) ──────────────────────────────────
-        t0 = time.perf_counter()
-        trig0, pmt_cur = extract_trigs_and_data14_signed(chunk0)
-        t['1_extract_ch0'] += time.perf_counter() - t0
+        # Detect events at sample i (z before x at same position).
+        z_mid_fires  = z_midpoint is not None and i >= z_midpoint
+        z_rise_fires = cur_z_above and not prev_z_above
+        x_fires      = cur_trig0 != prev_trig0
 
-        # ── Step 2: extract TAG - O(N) ───────────────────────────────────────────
-        t0 = time.perf_counter()
-        _, tag = extract_trigs_and_data14_signed(chunk1)
-        t['2_extract_ch1'] += time.perf_counter() - t0
+        if mode == "batch":
 
-        # ── Step 3: 2-chunk PMT sliding window - O(C) ───────────────────────────
-        # x_half_len < chunk_size → 2 chunks enough to cover any half-cycle
-        t0 = time.perf_counter()
-        pmt_window    = np.concatenate([pmt_prev, pmt_cur])
-        window_offset = prev_offset
-        t['3_pmt_window'] += time.perf_counter() - t0
+            if z_mid_fires or z_rise_fires or x_fires:
+                # Feed all samples accumulated since the last event as one batch.
+                if i > seg_start:
+                    proc.feed_samples(seg_start, pmt[seg_start:i])
+                seg_start = i
 
-        # ── Step 4: parse half-cycles - O(N) ─────────────────────────────────────
-        t0 = time.perf_counter()
-        x_hcs = x_parser.feed(trig0, offset)
-        z_hcs = z_parser.feed(tag,   offset)
-        t['4_parse'] += time.perf_counter() - t0
+                # ── z events ────────────────────────
+                if z_mid_fires:  # start -1 halfcycle
+                    proc.notify_z_hc_end(z_midpoint, -1)
+                    z_midpoint = None
 
-        # ── Step 5a: z half-cycles → VolumeProcessor - O(Nz) ─────────────────────
-        # z first, to ensure z_idx/zw are ready when x comes
-        t0 = time.perf_counter()
-        for z in z_hcs:
-            proc.feed_z_halfcycle(int(z[0]), int(z[1]), int(z[2]))
-        t['5a_feed_z'] += time.perf_counter() - t0
+                if z_rise_fires: # start +1 halfcycle
+                    proc.notify_z_hc_end(i, +1)
+                    z_midpoint = i + int(proc.z_period_est / 2)
 
-        # ── Step 5b: x half-cycles → VolumeProcessor → COO - O(Nx) ───────────────
-        t0 = time.perf_counter()
-        for x in x_hcs:
-            n_xcycles += 1
-            result = proc.feed_x_halfcycle(
-                int(x[0]), int(x[1]), int(x[2]),
-                pmt_window, window_offset,
-            )
+                # ── x event ──────────────────────────────────────────
+                if x_fires:
+                    n_xcycles += 1
+                    x_dir_next = +1 if cur_trig0 == 1 else -1
+                    for result in proc.notify_x_hc_end(i, x_dir_next):
+                        n_coo_out += 1
+                        _collect(result, vol_buf, save_base, scan_h, t)
 
-            if result is not None:
-                n_coo_out += 1
+            prev_trig0   = cur_trig0
+            prev_z_above = cur_z_above
 
-                # ── OUTPUT: get COO as soon as a x half-cycle is processed ────────────
-                vol_idx = result['volume_index']
-                vol_buf[vol_idx].append(result)
-                
-                if len(vol_buf[vol_idx]) >= scan_h:
-                    _save_volume(vol_buf.pop(vol_idx), save_base, t)
+    # Sample-by-sample version (veeeeeery slow on Python; for FPGA implementation)
+        elif mode == "one-by-one":    
+            cur_trig0   = int(trig0[i])
+            cur_z_above = int(tag[i]) > Z_THRESHOLD
+    
+            # ── z events ───────────
+            if z_mid_fires:
+                proc.notify_z_hc_end(z_midpoint, -1)
+                z_midpoint = None
+    
+            if z_rise_fires:
+                proc.notify_z_hc_end(i, +1)
+                z_midpoint = i + int(proc.z_period_est / 2)
+    
+            # ── x event ────────────
+            if x_fires:
+                n_xcycles += 1
+                x_dir_next = +1 if cur_trig0 == 1 else -1
+                for result in proc.notify_x_hc_end(i, x_dir_next):
+                    n_coo_out += 1
+                    _collect(result, vol_buf, save_base, scan_h, t)
+    
+            # ── feed this sample ──────────────────────────────────────
+            proc.feed_sample(i, int(pmt[i]))
+    
+            prev_trig0   = cur_trig0
+            prev_z_above = cur_z_above
 
-        t['5b_feed_x'] += time.perf_counter() - t0
 
-        pmt_prev    = pmt_cur
-        prev_offset = offset
-        n_chunks   += 1
+    # Feed remaining samples after the last event; not needed for one-by-one version
+    if mode == "batch" and seg_start < n_samples:
+        proc.feed_samples(seg_start, pmt[seg_start:])
 
-        if n_chunks % 500 == 0:
-            print(f"  [chunk {n_chunks}]  offset={offset:,}  "
-                  f"x_hcs={n_xcycles}  coo_out={n_coo_out}")
-            
+    t['4_loop'] += time.perf_counter() - t0
 
-    for lines in vol_buf.values():
-        if lines:
-            _save_volume(lines, save_base, t)
+    if not DROP_TAIL:
+        # ── flush last partial halfcycle ─────────────────────────────────
+        for result in proc.flush():
+            _collect(result, vol_buf, save_base, scan_h, t)
+
+        # ── save incomplete volumes ──────────────────────────────────────
+        for lines in vol_buf.values():
+            if lines:
+                _save_volume(lines, save_base, t)
 
     print(f"[INFO] Done.  x_hcs={n_xcycles}  coo_out={n_coo_out}")
-    print_timing_summary(t, n_chunks, n_coo_out)
+    print(f"COO output saved to: {save_base}")
+    print_timing_summary(t, n_xcycles, n_coo_out)
     return dict(t)
+
+
+# =========================
+# Helpers
+# =========================
+
+def _collect(result, vol_buf, save_base, scan_h, t):
+    '''
+    buffering coo data in result into vol_buf
+    if a full volume is collected, save it and clear the buffer
+    '''
+    vol_idx = result['volume_index']
+    vol_buf[vol_idx].append(result)
+    if len(vol_buf[vol_idx]) >= scan_h:
+        _save_volume(vol_buf.pop(vol_idx), save_base, t)
 
 
 def _save_volume(lines: list, save_base: Path, t: dict) -> None:
@@ -193,9 +238,9 @@ def _save_volume(lines: list, save_base: Path, t: dict) -> None:
         save_base / f"vol_{vol_idx:04d}.npz",
         x=vol_x, y=vol_y, z=vol_z, signal=vol_s, shape=shape,
     )
-    print(f"[VOL {vol_idx}]  {len(vol_s)} non-zero voxels  "
-          f"({100 * len(vol_s) / np.prod(shape):.1f}% fill)")
-    t['6_save_npz'] += time.perf_counter() - t0
+    fill = 100 * len(vol_s) / np.prod(shape)
+    print(f"[VOL {vol_idx}]  {len(vol_s)} non-zero voxels  ({fill:.1f}% fill)")
+    t['5_save_npz'] += time.perf_counter() - t0
 
 
 # =========================
@@ -204,18 +249,20 @@ def _save_volume(lines: list, save_base: Path, t: dict) -> None:
 
 def __main__():
     parser = argparse.ArgumentParser(
-        description="Lissajous 3D reconstruction — ver8 simulation"
+        description="Lissajous 3D reconstruction — ver9 streaming"
     )
-    parser.add_argument("--dataset",       nargs="+", type=str,
+    parser.add_argument("--dataset", "-d", nargs="+", type=str,
                         default=["1", "2", "3"], metavar="ID")
-    parser.add_argument("--z_slices",      type=int, default=Z_SLICES)
-    parser.add_argument("--scan_h",        type=int, default=SCAN_H)
-    parser.add_argument("--scan_w",        type=int, default=SCAN_W)
-    parser.add_argument("--out_h",         type=int, default=None)
-    parser.add_argument("--out_w",         type=int, default=None)
-    parser.add_argument("--data_root",     type=str, default=str(DATA_ROOT))
-    parser.add_argument("--save_root",     type=str, default=str(SAVE_ROOT))
-    parser.add_argument("--chunk_samples", type=int, default=CHUNK_SAMPLES)
+    parser.add_argument("--scan_h",        type=int,   default=SCAN_H)
+    parser.add_argument("--scan_w",        type=int,   default=SCAN_W)
+    parser.add_argument("--out_h",         type=int,   default=None)
+    parser.add_argument("--out_w",         type=int,   default=None)
+    parser.add_argument("--out_z",         type=int,   default=Z_SLICES)
+    parser.add_argument("--nominal_x_len", type=float, default=NOMINAL_X_LEN)
+    parser.add_argument("--nominal_z_period", type=float, default=NOMINAL_Z_LEN)
+    parser.add_argument("--data_root",     type=str,   default=str(DATA_ROOT))
+    parser.add_argument("--save_root",     type=str,   default=str(SAVE_ROOT))
+    parser.add_argument("--mode",          type=str,   default="batch", choices=["one-by-one", "batch"])
     args = parser.parse_args()
 
     OUT_H = args.out_h if args.out_h is not None else args.scan_h
@@ -225,14 +272,16 @@ def __main__():
         print(f"\n[INFO] Processing dataset {ds}")
         processDataset(
             dataset_name  = ds,
-            z_slices      = args.z_slices,
+            z_slices      = args.out_z,
             scan_h        = args.scan_h,
             scan_w        = args.scan_w,
             out_h         = OUT_H,
             out_w         = OUT_W,
+            nominal_x_len = args.nominal_x_len,
+            nominal_z_period = args.nominal_z_period,
             data_root     = Path(args.data_root),
             save_root     = Path(args.save_root),
-            chunk_samples = args.chunk_samples,
+            mode          = args.mode,
         )
 
 
