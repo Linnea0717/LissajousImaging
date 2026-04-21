@@ -45,6 +45,14 @@ CHUNK_SAMPLES = 100_000
 DROP_BEFORE   = 20
 DROP_AFTER    = 20
 
+# =========================
+# Time Complexity
+# =========================
+# N: number of samples in raw data
+# C: chunk size (number of samples per chunk)
+# Nx: number of x half-cycles
+# Nz: number of z half-cycles
+
 
 # =========================
 # Main processing
@@ -104,37 +112,37 @@ def processDataset(
     for offset, chunk0, chunk1 in file_chunk_generator(
             raw0_path, raw1_path, chunk_samples):
 
-        # ── Step 1: extract trig0 + PMT ──────────────────────────────────
+        # ── Step 1: extract trig0 + PMT - O(N) ──────────────────────────────────
         t0 = time.perf_counter()
         trig0, pmt_cur = extract_trigs_and_data14_signed(chunk0)
         t['1_extract_ch0'] += time.perf_counter() - t0
 
-        # ── Step 2: extract TAG ───────────────────────────────────────────
+        # ── Step 2: extract TAG - O(N) ───────────────────────────────────────────
         t0 = time.perf_counter()
         _, tag = extract_trigs_and_data14_signed(chunk1)
         t['2_extract_ch1'] += time.perf_counter() - t0
 
-        # ── Step 3: 2-chunk PMT sliding window ───────────────────────────
+        # ── Step 3: 2-chunk PMT sliding window - O(C) ───────────────────────────
         # x_half_len < chunk_size → 2 chunks enough to cover any half-cycle
         t0 = time.perf_counter()
         pmt_window    = np.concatenate([pmt_prev, pmt_cur])
         window_offset = prev_offset
         t['3_pmt_window'] += time.perf_counter() - t0
 
-        # ── Step 4: parse half-cycles ─────────────────────────────────────
+        # ── Step 4: parse half-cycles - O(N) ─────────────────────────────────────
         t0 = time.perf_counter()
         x_hcs = x_parser.feed(trig0, offset)
         z_hcs = z_parser.feed(tag,   offset)
         t['4_parse'] += time.perf_counter() - t0
 
-        # ── Step 5a: z half-cycles → VolumeProcessor ─────────────────────
+        # ── Step 5a: z half-cycles → VolumeProcessor - O(Nz) ─────────────────────
         # z first, to ensure z_idx/zw are ready when x comes
         t0 = time.perf_counter()
         for z in z_hcs:
             proc.feed_z_halfcycle(int(z[0]), int(z[1]), int(z[2]))
         t['5a_feed_z'] += time.perf_counter() - t0
 
-        # ── Step 5b: x half-cycles → VolumeProcessor → COO ───────────────
+        # ── Step 5b: x half-cycles → VolumeProcessor → COO - O(Nx) ───────────────
         t0 = time.perf_counter()
         for x in x_hcs:
             n_xcycles += 1
@@ -149,6 +157,7 @@ def processDataset(
                 # ── OUTPUT: get COO as soon as a x half-cycle is processed ────────────
                 vol_idx = result['volume_index']
                 vol_buf[vol_idx].append(result)
+                
                 if len(vol_buf[vol_idx]) >= scan_h:
                     _save_volume(vol_buf.pop(vol_idx), save_base, t)
 
@@ -161,8 +170,8 @@ def processDataset(
         if n_chunks % 500 == 0:
             print(f"  [chunk {n_chunks}]  offset={offset:,}  "
                   f"x_hcs={n_xcycles}  coo_out={n_coo_out}")
+            
 
-    # 尾巴：未滿的 volume
     for lines in vol_buf.values():
         if lines:
             _save_volume(lines, save_base, t)

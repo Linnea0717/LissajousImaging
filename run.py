@@ -34,7 +34,7 @@ def run_experiment(
     print(f'Quiet Mode: {"ON" if quiet else "OFF"}')
     print("=" * 60)
 
-    ver_name = "ver"
+    ver_name = "ver2"
 
     script_path = base_dir / ver_name / "construction.py"
     if not script_path.exists():
