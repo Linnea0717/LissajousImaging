@@ -32,9 +32,18 @@ Output
 import argparse
 import time
 from pathlib import Path
+import psutil, os
 
 import numpy as np
 import tifffile
+
+
+proc = psutil.Process(os.getpid())
+
+def snapshot(label):
+    mem = proc.memory_info()
+    cpu = proc.cpu_percent(interval=0.1)
+    print(f"[{label}]  RSS={mem.rss/1e6:.1f} MB  VMS={mem.vms/1e6:.1f} MB  CPU={cpu:.1f}%")
 
 
 # =========================
@@ -142,11 +151,15 @@ def convert_directory(
         t0 = time.perf_counter()
 
         vol_f32  = coo_to_dense(npz_path)
-        vol_u16  = normalize_uint16(vol_f32, pmin=pmin, pmax=pmax)
+        snapshot("After COO to dense conversion")
 
-        stem     = npz_path.stem                     # e.g. "vol_0003"
+        vol_u16  = normalize_uint16(vol_f32, pmin=pmin, pmax=pmax)
+        snapshot("After normalization to uint16")
+
+        stem     = npz_path.stem 
         tiff_path = out_dir / f"{stem}.tiff"
         save_tiff(vol_u16, tiff_path)
+        snapshot("After saving TIFF")
 
         if save_npy:
             npy_path = out_dir / f"{stem}.npy"

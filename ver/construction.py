@@ -10,6 +10,7 @@ construction.py
 import argparse
 from collections import defaultdict
 from pathlib import Path
+import psutil, os
 
 import numpy as np
 import time
@@ -45,6 +46,17 @@ SAMPLING_RATE    = 1_000_000_000
 NOMINAL_X_LEN    = SAMPLING_RATE / (X_FREQ * 2)  # theoretical x halfcycle length
 NOMINAL_Z_LEN    = SAMPLING_RATE / Z_FREQ        # theoretical z cycle length
 ESTIMATOR_WINDOW = 6
+
+# =========================
+# Memory and CPU monitoring
+# =========================
+
+proc = psutil.Process(os.getpid())
+
+def snapshot(label):
+    mem = proc.memory_info()
+    cpu = proc.cpu_percent(interval=0.1)
+    print(f"[{label}]  RSS={mem.rss/1e6:.1f} MB  VMS={mem.vms/1e6:.1f} MB  CPU={cpu:.1f}%")
 
 
 # =========================
@@ -82,12 +94,14 @@ def processDataset(
     n_samples = len(raw0)
     print(f"[INFO] Dataset {dataset_name}: {n_samples:,} samples")
     t['1_read'] += time.perf_counter() - t0
+    snapshot("After reading raw data")
 
     # ── Step 2: extract trig0, PMT, TAG ──────────────────────────────
     t0 = time.perf_counter()
     trig0, pmt = extract_trigs_and_data14_signed(raw0)
     _,     tag = extract_trigs_and_data14_signed(raw1)
     t['2_unpack'] += time.perf_counter() - t0
+    snapshot("After extracting data and triggers")
 
     # ── Step 3: initialise processor ──────────────────────────────────────
     shifts = compute_shift_array(scan_h, scan_w, COEFFS)
@@ -105,6 +119,7 @@ def processDataset(
         drop_before      = DROP_BEFORE,
         drop_after       = DROP_AFTER,
     )
+    snapshot("After initialising processor")
 
     vol_buf: dict[int, list] = defaultdict(list)
     n_xcycles = 0
@@ -187,6 +202,9 @@ def processDataset(
     
             prev_trig0   = cur_trig0
             prev_z_above = cur_z_above
+        
+        if i % 10_000_000 == 0 and i > 0:
+            snapshot(f"At sample {i:,}")
 
 
     # Feed remaining samples after the last event; not needed for one-by-one version
@@ -204,6 +222,8 @@ def processDataset(
         for lines in vol_buf.values():
             if lines:
                 _save_volume(lines, save_base, t)
+
+    snapshot("After processing all samples")
 
     print(f"[INFO] Done.  x_hcs={n_xcycles}  coo_out={n_coo_out}")
     print(f"COO output saved to: {save_base}")
